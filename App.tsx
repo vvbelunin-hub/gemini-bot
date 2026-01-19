@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { DriveFile, DriveItem, isFolder, FileType } from './types';
 import { fetchFolderContent } from './driveService';
 import { DRIVE_DATA } from './mockData';
@@ -31,6 +31,7 @@ export default function App() {
   const [isSearchActive, setIsSearchActive] = useState(false);
   const [copyStatus, setCopyStatus] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const demoTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const triggerHaptic = useCallback((type: 'light' | 'success' = 'light') => {
     if (isModern && tg?.HapticFeedback) {
@@ -54,20 +55,24 @@ export default function App() {
     return navigationStack[navigationStack.length - 1].id;
   }, [navigationStack, rootFolderId]);
 
-  const loadFolder = useCallback(async (id: string) => {
+  const loadFolder = useCallback(async (id: string, parentItems?: DriveItem[]) => {
     if (!id) return;
+    
+    // Очищаем предыдущий таймер, если он существует
+    if (demoTimeoutRef.current) {
+      clearTimeout(demoTimeoutRef.current);
+      demoTimeoutRef.current = null;
+    }
+    
     setLoading(true);
     setError(null);
     
     if (id === 'demo') {
-      setTimeout(() => {
-        let items = DRIVE_DATA.items;
-        if (navigationStack.length > 0) {
-          const last = navigationStack[navigationStack.length - 1];
-          if (isFolder(last)) items = last.items;
-        }
+      demoTimeoutRef.current = setTimeout(() => {
+        let items = parentItems || DRIVE_DATA.items;
         setCurrentItems([...items]);
         setLoading(false);
+        demoTimeoutRef.current = null;
       }, 300);
       return;
     }
@@ -80,13 +85,28 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [navigationStack]);
+  }, []);
+
+  // Очистка таймера при размонтировании
+  useEffect(() => {
+    return () => {
+      if (demoTimeoutRef.current) {
+        clearTimeout(demoTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const handleBack = useCallback(() => {
-    if (selectedFile) setSelectedFile(null);
-    else if (navigationStack.length > 0) setNavigationStack(prev => prev.slice(0, -1));
+    if (selectedFile) {
+      setSelectedFile(null);
+    } else {
+      setNavigationStack(prev => {
+        if (prev.length > 0) return prev.slice(0, -1);
+        return prev;
+      });
+    }
     triggerHaptic('light');
-  }, [selectedFile, navigationStack.length, triggerHaptic]);
+  }, [selectedFile, triggerHaptic]);
 
   useEffect(() => {
     if (isModern && tg?.BackButton) {
@@ -102,8 +122,17 @@ export default function App() {
   }, [navigationStack.length, selectedFile, handleBack, isModern, tg]);
 
   useEffect(() => {
-    loadFolder(activeFolderId);
-  }, [activeFolderId, loadFolder]);
+    if (activeFolderId === 'demo') {
+      const lastFolder = navigationStack.length > 0 ? navigationStack[navigationStack.length - 1] : null;
+      if (lastFolder && isFolder(lastFolder)) {
+        loadFolder(activeFolderId, lastFolder.items);
+      } else {
+        loadFolder(activeFolderId);
+      }
+    } else {
+      loadFolder(activeFolderId);
+    }
+  }, [activeFolderId, navigationStack, loadFolder]);
 
   const handleDownload = async (file: DriveFile) => {
     if (downloading || !file.url) return;
@@ -111,6 +140,9 @@ export default function App() {
     triggerHaptic('light');
     try {
       const response = await fetch(file.url);
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -118,21 +150,32 @@ export default function App() {
       a.download = file.name;
       document.body.appendChild(a);
       a.click();
+      document.body.removeChild(a);
       window.URL.revokeObjectURL(url);
       triggerHaptic('success');
     } catch (e) {
+      // Fallback: открываем файл в новом окне
       window.open(file.url, '_blank');
     } finally {
       setDownloading(false);
     }
   };
 
+  const cleanName = (name: string): string =>
+    name
+      // Убираем числовой префикс сортировки: 01_, 01_02_, 10_02_03_ и т.п.
+      .replace(/^\d+(?:_\d+)*_?/, '')
+      // Нижние подчеркивания превращаем в пробелы
+      .replace(/_/g, ' ')
+      .trim();
+
   const filteredItems = useMemo(() => {
     const q = searchQuery.toLowerCase();
-    return currentItems.filter(item => item.name.toLowerCase().includes(q));
+    return currentItems
+      // Скрытые файлы/папки: всё, что начинается с "_", не показываем
+      .filter(item => !String(item.name || '').trim().startsWith('_'))
+      .filter(item => item.name.toLowerCase().includes(q));
   }, [currentItems, searchQuery]);
-
-  const cleanName = (name: string): string => name.replace(/^\d+_/, '').replace(/_/g, ' ');
 
   return (
     <div className="flex flex-col h-full bg-[var(--tg-theme-bg-color)] overflow-hidden">
@@ -218,6 +261,14 @@ export default function App() {
                       <video className="w-full max-h-[60vh]" controls playsInline src={selectedFile.url} />
                     ) : selectedFile.type === FileType.IMAGE ? (
                       <img src={selectedFile.url} className="max-w-full max-h-[60vh] object-contain" alt="Preview" />
+                    ) : selectedFile.type === FileType.PDF ? (
+                      <iframe
+                        title={selectedFile.name}
+                        className="w-full h-[60vh] bg-white"
+                        // Для публичных PDF в Drive это самый стабильный предпросмотр в WebView
+                        src={`https://drive.google.com/file/d/${encodeURIComponent(String(selectedFile.id))}/preview`}
+                        allow="autoplay"
+                      />
                     ) : (
                       <div className="py-20 flex flex-col items-center">
                         <FileIcon type={selectedFile.type} />

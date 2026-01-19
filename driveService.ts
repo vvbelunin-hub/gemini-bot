@@ -24,23 +24,19 @@ export async function fetchFolderContent(folderId: string): Promise<DriveItem[]>
     throw new Error('Системная ошибка: API_KEY не найден в конфигурации сборки.');
   }
 
-  try {
-    const q = encodeURIComponent(`'${cleanId}' in parents and trashed=false`);
-    const fields = encodeURIComponent("files(id,name,mimeType,size)");
-    const url = `${baseUrl}?q=${q}&fields=${fields}&key=${apiKey}`;
-    
-    const response = await fetch(url);
-    if (!response.ok) {
-      if (response.status === 403) throw new Error('Доступ запрещен. Убедитесь, что папка открыта по ссылке.');
-      if (response.status === 404) throw new Error('Папка не найдена. Проверьте FOLDER_ID.');
-      throw new Error(`Ошибка Drive API: ${response.status}`);
-    }
-
-    const data = await response.json();
-    return processFiles(data.files || [], apiKey);
-  } catch (error: any) {
-    throw error;
+  const q = encodeURIComponent(`'${cleanId}' in parents and trashed=false`);
+  const fields = encodeURIComponent("files(id,name,mimeType,size)");
+  const url = `${baseUrl}?q=${q}&fields=${fields}&key=${apiKey}`;
+  
+  const response = await fetch(url);
+  if (!response.ok) {
+    if (response.status === 403) throw new Error('Доступ запрещен. Убедитесь, что папка открыта по ссылке.');
+    if (response.status === 404) throw new Error('Папка не найдена. Проверьте FOLDER_ID.');
+    throw new Error(`Ошибка Drive API: ${response.status}`);
   }
+
+  const data = await response.json();
+  return processFiles(data.files || [], apiKey);
 }
 
 async function processFiles(files: any[], apiKey: string): Promise<DriveItem[]> {
@@ -53,23 +49,26 @@ async function processFiles(files: any[], apiKey: string): Promise<DriveItem[]> 
         return { id: file.id, name: file.name, items: [] } as DriveFolder;
       } else {
         let type = FileType.DOC;
-        if (file.mimeType.includes('pdf')) type = FileType.PDF;
-        else if (file.mimeType.includes('image')) type = FileType.IMAGE;
-        else if (file.mimeType.includes('video')) type = FileType.VIDEO;
-        else if (file.mimeType.includes('text') || isGoogleDoc) type = FileType.TEXT;
-
         let downloadUrl = `${baseUrl}/${file.id}?alt=media&key=${apiKey}`;
         
-        // Для Google Docs принудительно экспортируем в PDF для просмотра
+        // Google Docs: вытаскиваем текст, чтобы показывать прямо в приложении
         if (isGoogleDoc) {
-          downloadUrl = `${baseUrl}/${file.id}/export?mimeType=application/pdf&key=${apiKey}`;
+          downloadUrl = `${baseUrl}/${file.id}/export?mimeType=text/plain&key=${apiKey}`;
+          type = FileType.TEXT;
+        } else if (file.mimeType.includes('pdf')) {
           type = FileType.PDF;
+        } else if (file.mimeType.includes('image')) {
+          type = FileType.IMAGE;
+        } else if (file.mimeType.includes('video')) {
+          type = FileType.VIDEO;
+        } else if (file.mimeType.includes('text')) {
+          type = FileType.TEXT;
         }
 
         const driveItem: DriveFile = { id: file.id, name: file.name, type, url: downloadUrl };
 
         // Если это текстовый файл, скачиваем его содержимое сразу для отображения в "чате"
-        if (type === FileType.TEXT && !isGoogleDoc) {
+        if (type === FileType.TEXT) {
           try {
             const res = await fetch(downloadUrl);
             if (res.ok) driveItem.content = await res.text();
@@ -80,7 +79,10 @@ async function processFiles(files: any[], apiKey: string): Promise<DriveItem[]> 
     })
   );
 
-  return items.sort((a, b) => {
+  return items
+    // Скрытые файлы/папки: всё, что начинается с "_", не возвращаем вообще
+    .filter(item => !String(item.name || '').trim().startsWith('_'))
+    .sort((a, b) => {
     const aFol = 'items' in a;
     const bFol = 'items' in b;
     if (aFol && !bFol) return -1;
