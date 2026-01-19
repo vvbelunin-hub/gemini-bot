@@ -1,6 +1,13 @@
-// Минимальные типы для окружения Vite, где мы используем define("process.env.*")
-// Это не добавляет Node-полифилы в рантайм — только убирает TS-ошибки.
-declare const process: {
-  env: Record<string, string | undefined>;
-};
+declare interface Window {
+  Telegram: {
+    WebApp: any;
+  };
+}
 
+declare namespace NodeJS {
+  interface ProcessEnv {
+    API_KEY: string;
+    FOLDER_ID: string;
+    PORT?: string;
+  }
+}
